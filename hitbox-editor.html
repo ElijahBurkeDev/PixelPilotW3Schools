@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pixel Pilot Hitbox Sheet Editor</title>
+  <style>
+    :root { color-scheme: dark; font-family: Consolas, monospace; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #10121a; color: #e9edf5; }
+    main { max-width: 1100px; margin: auto; }
+    h1 { font-size: 22px; margin: 0 0 8px; }
+    .hint { color: #9ca8bd; margin: 0 0 16px; font-size: 13px; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+    button, input[type="file"] { font: inherit; }
+    button { border: 1px solid #43506a; border-radius: 4px; background: #1d2637; color: #e9edf5; padding: 7px 10px; cursor: pointer; }
+    button:hover { background: #293750; }
+    button:disabled { opacity: .45; cursor: default; }
+    label { color: #aeb9cc; font-size: 13px; }
+    input[type="range"] { width: 120px; vertical-align: middle; }
+    #canvas-wrap { display: inline-block; max-width: 100%; overflow: auto; border: 1px solid #43506a; background: #171b29; }
+    canvas { display: block; image-rendering: pixelated; cursor: none; }
+    .status { min-height: 20px; margin: 10px 0; color: #8fe3ad; font-size: 13px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+    .panel { border: 1px solid #303b52; background: #171b29; padding: 12px; }
+    .panel h2 { margin: 0 0 10px; font-size: 14px; }
+    #regions { display: grid; gap: 7px; }
+    .region { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center; padding: 7px; border: 1px solid #303b52; }
+    .swatch { width: 14px; height: 14px; }
+    .region input { min-width: 0; width: 100%; background: transparent; color: #e9edf5; border: 0; border-bottom: 1px solid #43506a; padding: 3px; font: inherit; }
+    .region small { grid-column: 2 / 4; color: #9ca8bd; font-size: 11px; }
+    .region button { padding: 2px 7px; }
+    #output { width: 100%; min-height: 260px; margin: 16px 0 0; padding: 12px; resize: vertical; white-space: pre; overflow: auto; background: #0b0e15; border: 1px solid #303b52; color: #d7e1f4; font: 12px/1.5 Consolas, monospace; }
+    .meta { color: #9ca8bd; font-size: 12px; line-height: 1.6; }
+    @media (max-width: 760px) { body { padding: 12px; } .layout { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Pixel Pilot Hitbox Sheet Editor</h1>
+  <p class="hint">Upload a ship, click around each solid ship region, then press Finish Region. Use several simple polygons instead of tracing every pixel. The bright crosshair shows the exact pointer location.</p>
+
+  <div class="toolbar">
+    <button id="uploadButton">Upload ship</button>
+    <input id="upload" type="file" accept="image/*" hidden>
+    <button id="finishButton" disabled>Finish region</button>
+    <button id="undoButton" disabled>Undo point</button>
+    <button id="clearButton" disabled>Clear all</button>
+    <button id="copyButton" disabled>Copy JS</button>
+    <button id="applyButton" disabled>Apply edited code</button>
+    <label>Ship key <input id="shipKey" value="classic" spellcheck="false" style="width:110px"></label>
+    <label title="Round new and dragged points to this many image pixels"><input id="snapToggle" type="checkbox" checked> Pixel snap</label>
+    <label title="Smaller values give finer placement">Grid <input id="gridSize" type="number" min="1" max="32" step="1" value="4" style="width:48px"> px</label>
+    <label>Scale <input id="scale" type="range" min="1" max="5" step="0.25" value="2"><span id="scaleValue">2x</span></label>
+  </div>
+
+  <div class="layout">
+    <section>
+      <div id="canvas-wrap"><canvas id="canvas" width="640" height="360"></canvas></div>
+      <div id="status" class="status">Upload a ship image to begin.</div>
+      <textarea id="output" spellcheck="false">// Your ship hitbox data will appear here.</textarea>
+    </section>
+
+    <aside class="panel">
+      <h2>Hitbox regions</h2>
+      <div id="regions"></div>
+      <p class="meta">The export uses points relative to the image center. The game rotates these points with the ship, so the hitboxes do not stretch during tilt.</p>
+    </aside>
+  </div>
+</main>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const upload = document.getElementById('upload');
+const scaleInput = document.getElementById('scale');
+const scaleValue = document.getElementById('scaleValue');
+const finishButton = document.getElementById('finishButton');
+const undoButton = document.getElementById('undoButton');
+const clearButton = document.getElementById('clearButton');
+const copyButton = document.getElementById('copyButton');
+const applyButton = document.getElementById('applyButton');
+const shipKeyInput = document.getElementById('shipKey');
+const snapToggle = document.getElementById('snapToggle');
+const gridSizeInput = document.getElementById('gridSize');
+const status = document.getElementById('status');
+const regions = document.getElementById('regions');
+const output = document.getElementById('output');
+const colors = ['#4ade80', '#f87171', '#60a5fa', '#fbbf24', '#c084fc', '#34d399', '#fb923c', '#a78bfa'];
+
+let image = null;
+let imageWidth = 0;
+let imageHeight = 0;
+let scale = 2;
+let currentPoints = [];
+let hitboxes = [];
+let draggingVertex = null;
+let suppressNextClick = false;
+let cursorPoint = null;
+
+function setStatus(message) { status.textContent = message; }
+
+function resizeCanvas() {
+  if (!image) return;
+  canvas.width = Math.round(imageWidth * scale);
+  canvas.height = Math.round(imageHeight * scale);
+}
+
+function getCanvasPoint(event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (canvas.width / rect.width),
+    y: (event.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+function toImagePoint(point) {
+  return { x: point.x / scale, y: point.y / scale };
+}
+
+function snapCanvasPoint(point) {
+  if (!snapToggle.checked) return point;
+  const grid = Math.max(1, Number(gridSizeInput.value) || 1) * scale;
+  return {
+    x: Math.round(point.x / grid) * grid,
+    y: Math.round(point.y / grid) * grid,
+  };
+}
+
+function findVertex(point) {
+  const radius = 10;
+  let closest = null;
+  let closestDistance = radius * radius;
+  hitboxes.forEach((region, regionIndex) => {
+    region.points.forEach((imagePoint, pointIndex) => {
+      const canvasPoint = { x: imagePoint.x * scale, y: imagePoint.y * scale };
+      const dx = canvasPoint.x - point.x;
+      const dy = canvasPoint.y - point.y;
+      const distance = dx * dx + dy * dy;
+      if (distance < closestDistance) {
+        closest = { regionIndex, pointIndex };
+        closestDistance = distance;
+      }
+    });
+  });
+  return closest;
+}
+
+function drawPolygon(points, color, fillAlpha = 0.18) {
+  if (!points.length) return;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let index = 1; index < points.length; index++) ctx.lineTo(points[index].x, points[index].y);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.globalAlpha = fillAlpha;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+function drawCursorMarker() {
+  if (!cursorPoint || !image) return;
+  const { x, y } = cursorPoint;
+  ctx.save();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#05070b';
+  ctx.beginPath();
+  ctx.moveTo(x - 11, y); ctx.lineTo(x + 11, y);
+  ctx.moveTo(x, y - 11); ctx.lineTo(x, y + 11);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo(x - 11, y); ctx.lineTo(x + 11, y);
+  ctx.moveTo(x, y - 11); ctx.lineTo(x, y + 11);
+  ctx.stroke();
+  ctx.fillStyle = '#fbbf24';
+  ctx.beginPath();
+  ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (image) ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  hitboxes.forEach((region, index) => {
+    const points = region.points.map(point => ({ x: point.x * scale, y: point.y * scale }));
+    drawPolygon(points, colors[index % colors.length]);
+    if (points[0]) {
+      ctx.fillStyle = colors[index % colors.length];
+      ctx.font = 'bold 12px monospace';
+      ctx.fillText(region.label, points[0].x + 4, points[0].y - 5);
+    }
+  });
+
+  if (currentPoints.length) {
+    drawPolygon(currentPoints, '#ffffff', 0.08);
+    currentPoints.forEach((point, index) => {
+      ctx.fillStyle = index === 0 ? '#fbbf24' : '#ffffff';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+  drawCursorMarker();
+}
+
+function normalizedPoint(point) {
+  return {
+    x: ((point.x - imageWidth / 2) / imageWidth),
+    y: ((point.y - imageHeight / 2) / imageHeight),
+  };
+}
+
+function formatPoint(point) {
+  return `{ x: ${point.x.toFixed(3)}, y: ${point.y.toFixed(3)} }`;
+}
+
+function updateOutput() {
+  if (!image || !hitboxes.length) {
+    output.value = '// Draw and finish at least one polygon region.';
+    copyButton.disabled = true;
+    applyButton.disabled = true;
+    return;
+  }
+
+  const shipKey = shipKeyInput.value.trim().replace(/[^A-Za-z0-9_$]/g, '') || 'classic';
+  shipKeyInput.value = shipKey;
+  const lines = [
+    'window.SHIP_HITBOXES = window.SHIP_HITBOXES || {};',
+    '',
+    `window.SHIP_HITBOXES.${shipKey} = [`
+  ];
+
+  hitboxes.forEach(region => {
+    lines.push(`  [ // ${region.label}`);
+    region.points.forEach(point => lines.push(`    ${formatPoint(normalizedPoint(point))},`));
+    lines.push('  ],');
+  });
+
+  lines.push('];');
+  output.value = lines.join('\n');
+  copyButton.disabled = false;
+  applyButton.disabled = false;
+}
+
+function applyEditedCode() {
+  if (!image) return;
+  try {
+    const sandbox = {};
+    const exported = new Function('window', `${output.value}\nreturn window.SHIP_HITBOXES;`)(sandbox);
+    const shipKey = shipKeyInput.value.trim().replace(/[^A-Za-z0-9_$]/g, '') || 'classic';
+    const candidate = exported && exported[shipKey];
+    if (!Array.isArray(candidate) || !candidate.length) throw new Error('Expected at least one polygon.');
+
+    const nextHitboxes = candidate.map((region, regionIndex) => {
+      if (!Array.isArray(region) || region.length < 3) throw new Error(`Region ${regionIndex + 1} needs at least 3 points.`);
+      const points = region.map(point => {
+        if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) throw new Error('Every point needs numeric x and y values.');
+        return {
+          x: (point.x + 0.5) * imageWidth,
+          y: (point.y + 0.5) * imageHeight,
+        };
+      });
+      return { label: `region ${regionIndex + 1}`, points };
+    });
+
+    hitboxes = nextHitboxes;
+    currentPoints = [];
+    updateRegions();
+    updateOutput();
+    render();
+    setStatus('Edited polygon data applied to the canvas.');
+  } catch (error) {
+    setStatus(`Could not apply code: ${error.message}`);
+  }
+}
+
+function updateRegions() {
+  regions.innerHTML = '';
+  hitboxes.forEach((region, index) => {
+    const row = document.createElement('div');
+    row.className = 'region';
+    row.innerHTML = `<span class="swatch" style="background:${colors[index % colors.length]}"></span><input value="${region.label}"><button type="button">x</button><small>${region.points.length} points</small>`;
+    row.querySelector('input').addEventListener('input', event => {
+      region.label = event.target.value || `region ${index + 1}`;
+      render();
+      updateOutput();
+    });
+    row.querySelector('button').addEventListener('click', () => {
+      hitboxes.splice(index, 1);
+      updateRegions();
+      updateOutput();
+      render();
+    });
+    regions.appendChild(row);
+  });
+  clearButton.disabled = !hitboxes.length && !currentPoints.length;
+  finishButton.disabled = currentPoints.length < 3;
+  undoButton.disabled = !currentPoints.length;
+}
+
+uploadButton.addEventListener('click', () => upload.click());
+upload.addEventListener('change', event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const nextImage = new Image();
+    nextImage.onload = () => {
+      image = nextImage;
+      imageWidth = nextImage.naturalWidth;
+      imageHeight = nextImage.naturalHeight;
+      currentPoints = [];
+      hitboxes = [];
+      resizeCanvas();
+      updateRegions();
+      updateOutput();
+      render();
+      setStatus(`Image loaded: ${imageWidth} x ${imageHeight}. Click points around a solid ship region.`);
+    };
+    nextImage.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+scaleInput.addEventListener('input', () => {
+  scale = Number(scaleInput.value);
+  scaleValue.textContent = `${scale}x`;
+  resizeCanvas();
+  render();
+});
+
+shipKeyInput.addEventListener('input', updateOutput);
+
+canvas.addEventListener('click', event => {
+  if (!image) return;
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    return;
+  }
+  currentPoints.push(getCanvasPoint(event));
+  currentPoints[currentPoints.length - 1] = snapCanvasPoint(currentPoints[currentPoints.length - 1]);
+  updateRegions();
+  render();
+  setStatus(`${currentPoints.length} points in the current region. Finish it when the outline is closed.`);
+});
+
+canvas.addEventListener('mousedown', event => {
+  if (!image) return;
+  cursorPoint = getCanvasPoint(event);
+  const vertex = findVertex(getCanvasPoint(event));
+  if (vertex) {
+    draggingVertex = vertex;
+    canvas.style.cursor = 'grabbing';
+  }
+});
+
+canvas.addEventListener('mousemove', event => {
+  cursorPoint = getCanvasPoint(event);
+  if (!draggingVertex) {
+    render();
+    return;
+  }
+  const point = snapCanvasPoint(cursorPoint);
+  hitboxes[draggingVertex.regionIndex].points[draggingVertex.pointIndex] = toImagePoint(point);
+  updateRegions();
+  updateOutput();
+  render();
+  setStatus('Moving vertex. Release to keep the snapped position.');
+});
+
+canvas.addEventListener('mouseleave', () => {
+  cursorPoint = null;
+  render();
+});
+
+window.addEventListener('mouseup', () => {
+  if (!draggingVertex) return;
+  draggingVertex = null;
+  suppressNextClick = true;
+  canvas.style.cursor = 'crosshair';
+});
+
+finishButton.addEventListener('click', () => {
+  if (currentPoints.length < 3) return;
+  hitboxes.push({
+    label: `region ${hitboxes.length + 1}`,
+    points: currentPoints.map(toImagePoint),
+  });
+  currentPoints = [];
+  updateRegions();
+  updateOutput();
+  render();
+  setStatus('Region saved. Add another region or copy the generated JS.');
+});
+
+undoButton.addEventListener('click', () => {
+  currentPoints.pop();
+  updateRegions();
+  render();
+});
+
+applyButton.addEventListener('click', applyEditedCode);
+gridSizeInput.addEventListener('input', render);
+snapToggle.addEventListener('change', render);
+
+clearButton.addEventListener('click', () => {
+  currentPoints = [];
+  hitboxes = [];
+  updateRegions();
+  updateOutput();
+  render();
+  setStatus('All regions cleared.');
+});
+
+copyButton.addEventListener('click', async () => {
+  await navigator.clipboard.writeText(output.value);
+  copyButton.textContent = 'Copied';
+  setTimeout(() => { copyButton.textContent = 'Copy JS'; }, 1200);
+});
+
+updateRegions();
+updateOutput();
+render();
+</script>
+</body>
+</html>

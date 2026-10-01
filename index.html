@@ -1,0 +1,153 @@
+﻿<!DOCTYPE html>
+<html>
+
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="UTF-8">
+  <title>Pixel Pilot</title>
+  <link rel="icon" type="image/x-icon" href="./images/misc/ppfavicon.ico">
+</head>
+
+<body>
+<script>
+
+
+fetch('https://raw.githubusercontent.com/ElijahBurkeDev/PixelPilot/refs/heads/dev/game.html', { cache: 'no-store' })
+  .then(response => {
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return response.text();
+  })
+  .then(html => {
+    document.body.innerHTML = html;
+
+    const musicScript = document.createElement('script');
+    musicScript.src = `./music.js?v=${Date.now()}`;
+    musicScript.onload = () => {
+      const hitboxScript = document.createElement('script');
+      hitboxScript.src = `./hitboxes/classic.js?v=${Date.now()}`;
+      hitboxScript.onload = () => {
+      const prospectorHitboxScript = document.createElement('script');
+      prospectorHitboxScript.src = `./hitboxes/pixpro.js?v=${Date.now()}`;
+      prospectorHitboxScript.onload = () => {
+        loadGameScripts(() => {
+          console.log('Remote game and content scripts loaded successfully');
+          queryShipCookie() || showShip('classic');
+        }, () => {
+          console.error('Failed to load remote game content, trying local fallback...');
+          loadLocalFallback();
+        });
+      };
+      prospectorHitboxScript.onerror = () => {
+        console.error('Failed to load remote Prospector hitboxes, trying local fallback...');
+        loadLocalFallback();
+      };
+      document.body.appendChild(prospectorHitboxScript);
+      };
+      hitboxScript.onerror = () => {
+        console.error('Failed to load remote classic hitboxes, trying local fallback...');
+        loadLocalFallback();
+      };
+      document.body.appendChild(hitboxScript);
+    };
+    musicScript.onerror = () => {
+      console.error('Failed to load remote music script, trying local fallback...');
+      loadLocalFallback();
+    };
+    document.body.appendChild(musicScript);
+  })
+  .catch(error => {
+    console.warn('Remote fetch failed, reverting to local files:', error);
+    loadLocalFallback();
+  });
+
+function loadGameScripts(onSuccess, onError) {
+  const scripts = [
+    './splash-strings.js',
+    './end-screen-quips.js',
+    './script.js',
+    './controls.js',
+  ];
+
+  function loadNext(index) {
+    if (index === scripts.length) {
+      onSuccess();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = `${scripts[index]}?v=${Date.now()}`;
+    script.onload = () => loadNext(index + 1);
+    script.onerror = onError;
+    document.body.appendChild(script);
+  }
+
+  loadNext(0);
+}
+
+function loadLocalFallback() {
+
+  const confirmReload = confirm(
+    "Fallback Mode Activated\n\n" +
+    "The remote server could not be reached. You are now loading a fallback version.\n\n" +
+    "WARNING: This version might be outdated compared to the official release.\n\n" +
+    "Click 'Cancel' if you want to wait and try again, or 'OK' to continue."
+  );
+
+  if (!confirmReload) {
+    console.log("User cancelled fallback load.");
+    return; // stop execution
+  }
+
+
+  fetch('game.html', { cache: 'no-store' })
+    .then(response => {
+      if (!response.ok) {
+        throw new Error('Local game.html not found');
+      }
+      return response.text();
+    })
+    .then(html => {
+      document.body.innerHTML = html;
+      
+      const musicScript = document.createElement('script');
+      musicScript.src = `./music.js?v=${Date.now()}`;
+      musicScript.onload = () => {
+        const hitboxScript = document.createElement('script');
+        hitboxScript.src = `./hitboxes/classic.js?v=${Date.now()}`;
+        hitboxScript.onload = () => {
+        const prospectorHitboxScript = document.createElement('script');
+        prospectorHitboxScript.src = `./hitboxes/pixpro.js?v=${Date.now()}`;
+        prospectorHitboxScript.onload = () => {
+          loadGameScripts(() => {
+            console.log('Local fallback game and content scripts loaded successfully');
+            queryShipCookie() || showShip('classic');
+          }, () => {
+            console.error('Local game content scripts also failed!');
+          });
+        };
+        prospectorHitboxScript.onerror = () => {
+          console.error('Local Prospector hitboxes also failed!');
+        };
+        document.body.appendChild(prospectorHitboxScript);
+        };
+        hitboxScript.onerror = () => {
+          console.error('Local classic hitboxes also failed!');
+        };
+        document.body.appendChild(hitboxScript);
+      };
+      musicScript.onerror = () => {
+        console.error('Local music script also failed!');
+      };
+      document.body.appendChild(musicScript);
+    })
+    .catch(err => {
+      console.error('Fallback failed completely:', err);
+      document.body.innerHTML = '<h1>Service Unavailable</h1><p>Please check your connection or try again later.</p>';
+    });
+}
+
+</script>
+</body>
+</html>
